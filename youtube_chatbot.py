@@ -1,33 +1,25 @@
-'''import streamlit as st
+# youtube_chatbot_langchain_v1_0_5.py
+import streamlit as st
 import os
 import re
+from typing import List, Dict
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
-# Updated LangChain imports for recent releases
-from langchain.retrievers import create_history_aware_retriever
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain.memory import ConversationBufferMemory
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 
 # --- Configuration ---
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_K = 4  # number of documents to retrieve
 
-# --- 1. UTILITY FUNCTIONS ---
-
+# --- Utility: extract YouTube video id ---
 def extract_video_id(url_or_id: str) -> str | None:
-    """Extracts the 11-character YouTube video ID from various URL formats.
-
-    Handles full URLs, short youtu.be links, /shorts/ links or raw 11-char ids.
-    """
     if not url_or_id:
         return None
-    # common patterns: v=ID, /watch?v=ID, youtu.be/ID, /embed/ID, /shorts/ID
     patterns = [
         r"v=([0-9A-Za-z_-]{11})",
         r"youtu\.be/([0-9A-Za-z_-]{11})",
@@ -42,103 +34,132 @@ def extract_video_id(url_or_id: str) -> str | None:
             return m.group(1)
     return None
 
-# --- 2. CORE RAG PIPELINE SETUP ---
-
-# Cache the heavy resource creation (LLM, Embeddings, Vector Store)
-@st.cache_resource(show_spinner="Setting up RAG and loading transcript...")
-def setup_rag_pipeline(video_id: str):
-    """Initializes the LLM, loads the transcript, creates vector store, and builds the retrieval chain.
-
-    NOTE: replace FAISS/HuggingFaceEmbeddings with your preferred vectorstore/embeddings in prod.
+# --- Helper: safely call LLM to rewrite follow-ups into standalone query ---
+def rewrite_followup_to_standalone(llm: ChatGoogleGenerativeAI, chat_history: List[Dict], user_question: str) -> str:
     """
+    Build a prompt that contains chat history and the follow-up question; ask LLM to return a concise standalone query.
+    Returns the rewritten query string.
+    """
+    # turn history into a readable block
+    if chat_history:
+        history_text = []
+        for msg in chat_history:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            prefix = "User:" if role == "user" else "Assistant:"
+            history_text.append(f"{prefix} {content}")
+        history_block = "\n".join(history_text)
+    else:
+        history_block = "(no prior conversation)"
 
-    # 1. Securely load API Key
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key:
-        st.error("GEMINI_API_KEY not found. Please set it securely in Streamlit Secrets.")
-        st.stop()
-
-    # 2. Initialize LLM
-    llm = ChatGoogleGenerativeAI(
-        model=LLM_MODEL,
-        temperature=0.1,
-        api_key=api_key,
+    rewrite_prompt = (
+        "You are a utility that rewrites follow-up questions into concise standalone search queries. "
+        "Do NOT answer — only produce the rewritten search query.\n\n"
+        f"Conversation history:\n{history_block}\n\n"
+        f"Follow-up question: {user_question}\n\n"
+        "Standalone search query:"
     )
 
-    # 3. Load Transcript
+    # ChatGoogleGenerativeAI supports .invoke(messages) where messages can be a list of tuples or a HumanMessage.
+    # We use HumanMessage for compatibility and get the response content.
+    response: AIMessage = llm.invoke([HumanMessage(content=rewrite_prompt)])
+    rewritten = (response.content or "").strip()
+    # defensive fallback: if LLM returns long text, try to take the first line
+    if "\n" in rewritten:
+        first_line = rewritten.splitlines()[0].strip()
+        if first_line:
+            return first_line
+    return rewritten
+
+# --- Helper: fetch relevant documents from FAISS vectorstore ---
+def retrieve_documents(vector_store: FAISS, query: str, k: int = EMBEDDING_K):
+    """
+    Returns a list of documents (langchain Document-like objects) given the query.
+    FAISS vector_store typically exposes similarity_search() or similar. We'll try both common names.
+    """
+    # try preferred API names in order
+    if hasattr(vector_store, "similarity_search"):
+        return vector_store.similarity_search(query, k=k)
+    if hasattr(vector_store, "search"):
+        return vector_store.search(query, k=k)
+    if hasattr(vector_store, "as_retriever"):
+        # try retriever path
+        retr = vector_store.as_retriever(search_kwargs={"k": k})
+        if hasattr(retr, "get_relevant_documents"):
+            return retr.get_relevant_documents(query)
+        if hasattr(retr, "retrieve"):
+            return retr.retrieve(query)
+    # last resort: raise
+    raise RuntimeError("Unsupported vector_store API: cannot run similarity search")
+
+# --- Helper: call LLM to answer from context ---
+def answer_from_context(llm: ChatGoogleGenerativeAI, context_docs: List, user_question: str) -> str:
+    """
+    Build a prompt that contains the concatenated context from retrieved docs and the user's question.
+    Ask LLM to answer strictly from provided context and cite when unsure.
+    """
+    # create a compact context string (include small separators and optional source markers)
+    ctx_pieces = []
+    for i, d in enumerate(context_docs, start=1):
+        text = getattr(d, "page_content", None) or getattr(d, "content", None) or str(d)
+        # guard length (you might want to truncate very long docs)
+        ctx_pieces.append(f"--- DOCUMENT {i} ---\n{text}\n")
+    context_block = "\n".join(ctx_pieces).strip() or "No context extracted."
+
+    qa_prompt = (
+        "You are a helpful assistant. Answer the user's question *only* using the information in the 'Context from Transcript' below. "
+        "If the context does not contain the answer, say you cannot answer from the video transcript.\n\n"
+        f"Context from Transcript:\n{context_block}\n\n"
+        f"User question: {user_question}\n\n"
+        "Answer (be concise, and base your answer strictly on the context above):"
+    )
+
+    response: AIMessage = llm.invoke([HumanMessage(content=qa_prompt)])
+    answer = (response.content or "").strip()
+    return answer
+
+# --- Setup / caching heavy resources ---
+@st.cache_resource(show_spinner="Setting up RAG and loading transcript...")
+def setup_rag_pipeline(video_id: str):
+    # load key
+    api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        st.error("GEMINI_API_KEY not found in Streamlit secrets or environment.")
+        st.stop()
+
+    # init LLM
+    llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0.0, api_key=api_key)
+
+    # load transcript
     try:
-        transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=["en"])  # may raise
-        transcript = " ".join(chunk["text"] for chunk in transcript_list)
+        transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
+        transcript = " ".join(chunk.get("text", "") for chunk in transcript_list)
     except TranscriptsDisabled:
-        st.error(f"Transcripts are disabled or unavailable for video ID: `{video_id}`.")
+        st.error(f"Transcripts disabled/unavailable for video ID: {video_id}")
         return None
     except Exception as e:
         st.error(f"Error fetching transcript: {e}")
         return None
 
-    # 4. Chunking and Embedding
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        separators=["\n\n", "\n", " ", ""],
-    )
+    # chunking
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, separators=["\n\n", "\n", " ", ""])
     chunks = splitter.create_documents([transcript])
 
+    # embeddings + vectorstore
     embedding = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
     vector_store = FAISS.from_documents(chunks, embedding)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 
-    # --- 5. Chain Construction for latest LangChain ---
+    # return the LLM and vector store so caller can orchestrate manual history-aware flow
+    return {"llm": llm, "vector_store": vector_store}
 
-    # A) Rephrase prompt: rewrite follow-up Q into standalone query using chat history
-    rephrase_prompt = ChatPromptTemplate.from_messages([
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("user", "{input}"),
-        ("system", "Given the above conversation, generate a concise, standalone search query to find relevant information from the transcript. Do not answer the question."),
-    ])
-
-    # B) Create history-aware retriever
-    history_aware_retriever = create_history_aware_retriever(
-        llm=llm, retriever=retriever, prompt=rephrase_prompt
-    )
-
-    # C) QA prompt used by the document-combiner chain
-    qa_prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are a helpful assistant. Answer the user's question ONLY from the following video transcript context. "
-         "Maintain a conversational style but strictly adhere to the provided context. "
-         "If the context is insufficient, politely say you cannot answer based on the video content.\n\n"
-         "Context from Transcript: {context}"),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("user", "{input}"),
-    ])
-
-    # D) Build combine_documents chain ("stuff" strategy). In newer LangChain you pass the prompt + llm here.
-    combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=qa_prompt)
-
-    # E) Final retrieval chain ties the history-aware retriever + combiner together
-    retrieval_chain = create_retrieval_chain(
-        retriever=history_aware_retriever,
-        combine_documents_chain=combine_docs_chain,
-    )
-
-    return retrieval_chain
-
-# --- 3. STREAMLIT APPLICATION ---
-
-
+# --- Streamlit app ---
 def main():
-    st.set_page_config(page_title="YouTube Transcript Chatbot (Dynamic)", layout="wide")
-    st.title("📹 Gemini Chatbot: Chat with Any YouTube Video")
+    st.set_page_config(page_title="YouTube Transcript Chatbot (LangChain v1.0.5)", layout="wide")
+    st.title("📹 Gemini Chatbot (LangChain v1.0.5) — Chat with a YouTube Transcript")
 
-    # --- Sidebar for Input ---
     with st.sidebar:
         st.header("1. Enter Video URL")
-        url_input = st.text_input(
-            "YouTube URL or Video ID:",
-            placeholder="e.g., https://www.youtube.com/watch?v=Gfr50f6ZBvo",
-        )
-
+        url_input = st.text_input("YouTube URL or Video ID:", placeholder="https://www.youtube.com/watch?v=Gfr50f6ZBvo")
         video_id = extract_video_id(url_input)
 
         if video_id:
@@ -148,90 +169,58 @@ def main():
             st.header("2. Start Chatting")
             chat_key = f"chat_input_{video_id}"
         else:
-            st.error("Please enter a valid YouTube URL or 11-character video ID.")
+            st.error("Enter a valid YouTube URL or 11-character video ID.")
             return
 
-    # --- Main App Logic ---
-    chain = setup_rag_pipeline(video_id)
-    if chain is None:
+    # setup heavy resources
+    env = setup_rag_pipeline(video_id)
+    if env is None:
         return
+    llm = env["llm"]
+    vector_store = env["vector_store"]
 
-    # Initialize chat history in session state for the specific video
+    # initialize session history for this video
     if "video_id" not in st.session_state or st.session_state.video_id != video_id:
-        st.session_state.messages = [
-            AIMessage(content=f"Hello! I have loaded the transcript for video ID: `{video_id}`. Ask me anything about its content!")
-        ]
         st.session_state.video_id = video_id
+        st.session_state.messages = [
+            {"role": "assistant", "content": f"Hello! I loaded the transcript for video `{video_id}`. Ask me anything about it."}
+        ]
 
-    # Display chat messages
-    for message in st.session_state.messages:
-        role = "assistant" if isinstance(message, AIMessage) else "user"
+    # display messages
+    for msg in st.session_state.messages:
+        role = "assistant" if msg["role"] == "assistant" else "user"
         with st.chat_message(role):
-            st.markdown(message.content)
+            st.markdown(msg["content"])
 
-    # Handle user input
+    # handle new user input
     if prompt := st.chat_input("Ask a question about the video transcript...", key=chat_key):
-        # Add user message to chat history (LangChain-friendly form kept separately)
-        st.session_state.messages.append(HumanMessage(content=prompt))
+        # append user message to session history
+        st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching and generating response..."):
+            with st.spinner("Rewriting query, retrieving docs, and generating answer..."):
                 try:
-                    # Convert Streamlit message objects to simple role/content dicts for the chain
-                    history_for_chain = [
-                        {"role": "assistant" if isinstance(m, AIMessage) else "user", "content": m.content}
-                        for m in st.session_state.messages
-                    ]
+                    # 1) rewrite follow-up question to standalone (if needed)
+                    rewritten_query = rewrite_followup_to_standalone(llm, st.session_state.messages[:-1], prompt)
+                    # if rewriting produces an empty string, fall back to user's prompt
+                    if not rewritten_query:
+                        rewritten_query = prompt
 
-                    # Invoke the retrieval chain
-                    response = chain.invoke({
-                        "input": prompt,
-                        "chat_history": history_for_chain,
-                    })
+                    # 2) retrieve documents from vector store
+                    retrieved_docs = retrieve_documents(vector_store, rewritten_query, k=EMBEDDING_K)
 
-                    # Robustly extract the answer field (different chain versions use different keys)
-                    answer = response.get("answer") or response.get("output_text") or str(response)
+                    # 3) answer using the context from retrieved docs
+                    answer = answer_from_context(llm, retrieved_docs, prompt)
 
+                    # show answer and append to history
                     st.markdown(answer)
-                    st.session_state.messages.append(AIMessage(content=answer))
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
 
                 except Exception as e:
-                    st.error(f"An error occurred during chain execution. Please check your Gemini API Key and Streamlit Logs. Error: {e}")
-
-
-if __name__ == "__main__":
-    main()
-'''
-import streamlit as st
-import langchain
-import sys
-
-def main():
-    """
-    A minimal Streamlit application to display the installed LangChain version.
-    """
-    st.set_page_config(page_title="LangChain Version Check", layout="centered")
-    
-    st.title("🐍 LangChain Version Status")
-
-    try:
-        # Access the __version__ attribute directly from the imported package
-        version = langchain.__version__
-        st.success(f"**Status: SUCCESS**")
-        st.markdown(f"The installed `langchain` version is: **`{version}`**")
-        st.info("This confirms that the core `langchain` package is successfully installed in your Streamlit environment.")
-    except AttributeError:
-        st.error("Error: Could not retrieve LangChain version.")
-        st.markdown("The `langchain` package might be installed, but the `__version__` attribute is unavailable.")
-    except ImportError:
-        st.error("Error: The `langchain` package is NOT installed.")
-        st.markdown("Please ensure `langchain` is listed in your `requirements.txt` file and your app is rebooted.")
-
-    st.markdown("---")
-    st.markdown(f"**Python Interpreter:** `{sys.version.split(' ')[0]}`")
+                    st.error(f"Chain execution failed: {e}")
 
 if __name__ == "__main__":
     main()
