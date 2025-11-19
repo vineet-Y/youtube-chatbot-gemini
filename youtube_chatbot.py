@@ -1,7 +1,10 @@
-# youtube_chatbot_langchain_v1_0_5.py
+# youtube_chatbot_free_fallback.py
 import streamlit as st
 import os
 import re
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import List, Dict
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -9,15 +12,109 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+)
 
 # --- Configuration ---
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-EMBEDDING_K = 4  # number of documents to retrieve
+EMBEDDING_K = 4  # number of docs to fetch
 
-# --- Utility: extract YouTube video id ---
+# ------------------- FREE TRANSCRIPT HELPERS -------------------
+
+def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> str | None:
+    """
+    Use yt-dlp to download (auto) subtitles for the video and convert to plain text.
+    Returns None if subtitles are not available or yt-dlp not found.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    tmpdir = tempfile.mkdtemp(prefix="ytdlp_subs_")
+    out_template = os.path.join(tmpdir, "%(id)s.%(ext)s")
+
+    cmd = [
+        "yt-dlp",
+        "--skip-download",
+        "--write-auto-sub",  # try auto-generated subtitles
+        "--sub-lang", lang,
+        "--output", out_template,
+        url,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=90)
+    except FileNotFoundError:
+        # yt-dlp binary not available
+        return None
+    except subprocess.CalledProcessError:
+        return None
+    except subprocess.TimeoutExpired:
+        return None
+
+    # find a .vtt or .srt file and convert to text
+    for p in Path(tmpdir).glob("*"):
+        if p.suffix.lower() in (".vtt", ".srt"):
+            raw = p.read_text(encoding="utf-8", errors="ignore")
+            lines = []
+            for ln in raw.splitlines():
+                # drop timestamps and indices and headers
+                if "-->" in ln:
+                    continue
+                if ln.strip().isdigit():
+                    continue
+                if ln.strip().upper().startswith("WEBVTT"):
+                    continue
+                lines.append(ln.rstrip())
+            text = "\n".join([l for l in lines if l.strip()]).strip()
+            # cleanup (best effort)
+            try:
+                for f in Path(tmpdir).glob("*"):
+                    f.unlink()
+                Path(tmpdir).rmdir()
+            except Exception:
+                pass
+            return text or None
+    return None
+
+
+def fetch_transcript_free(video_id: str) -> str:
+    """
+    Free-first strategy:
+    1) Try youtube-transcript-api
+    2) Fallback to yt-dlp
+    Raises RuntimeError if neither works.
+    """
+    # 1) try youtube_transcript_api
+    try:
+        transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
+        return " ".join(chunk.get("text", "") for chunk in transcript_list).strip()
+    except TranscriptsDisabled:
+        # transcript disabled according to the library — fall back to yt-dlp
+        pass
+    except NoTranscriptFound:
+        pass
+    except Exception:
+        # generic failure (often IP blocked) — fall back to yt-dlp
+        pass
+
+    # 2) fallback: yt-dlp (free)
+    subs = download_subs_with_ytdlp(video_id, lang="en")
+    if subs:
+        return subs
+
+    # 3) nothing worked
+    raise RuntimeError(
+        f"Could not fetch transcript for video id {video_id}. "
+        "Tried youtube-transcript-api and yt-dlp. "
+        "If you run this on a cloud VM that is blocked, try running locally (home IP) "
+        "or check if the video actually has captions."
+    )
+
+# ------------------- LangChain v1.0.5 compatible RAG flow -------------------
+
 def extract_video_id(url_or_id: str) -> str | None:
+    """Extract 11-char youtube id from URL or raw id"""
     if not url_or_id:
         return None
     patterns = [
@@ -34,13 +131,11 @@ def extract_video_id(url_or_id: str) -> str | None:
             return m.group(1)
     return None
 
-# --- Helper: safely call LLM to rewrite follow-ups into standalone query ---
+
 def rewrite_followup_to_standalone(llm: ChatGoogleGenerativeAI, chat_history: List[Dict], user_question: str) -> str:
     """
-    Build a prompt that contains chat history and the follow-up question; ask LLM to return a concise standalone query.
-    Returns the rewritten query string.
+    Ask the LLM to rewrite a follow-up question into a standalone query given chat_history.
     """
-    # turn history into a readable block
     if chat_history:
         history_text = []
         for msg in chat_history:
@@ -59,50 +154,40 @@ def rewrite_followup_to_standalone(llm: ChatGoogleGenerativeAI, chat_history: Li
         f"Follow-up question: {user_question}\n\n"
         "Standalone search query:"
     )
-
-    # ChatGoogleGenerativeAI supports .invoke(messages) where messages can be a list of tuples or a HumanMessage.
-    # We use HumanMessage for compatibility and get the response content.
     response: AIMessage = llm.invoke([HumanMessage(content=rewrite_prompt)])
     rewritten = (response.content or "").strip()
-    # defensive fallback: if LLM returns long text, try to take the first line
     if "\n" in rewritten:
         first_line = rewritten.splitlines()[0].strip()
         if first_line:
             return first_line
     return rewritten
 
-# --- Helper: fetch relevant documents from FAISS vectorstore ---
+
 def retrieve_documents(vector_store: FAISS, query: str, k: int = EMBEDDING_K):
     """
-    Returns a list of documents (langchain Document-like objects) given the query.
-    FAISS vector_store typically exposes similarity_search() or similar. We'll try both common names.
+    Get relevant documents from FAISS-compatible vector store.
+    Supports common wrapper method names.
     """
-    # try preferred API names in order
     if hasattr(vector_store, "similarity_search"):
         return vector_store.similarity_search(query, k=k)
     if hasattr(vector_store, "search"):
         return vector_store.search(query, k=k)
     if hasattr(vector_store, "as_retriever"):
-        # try retriever path
         retr = vector_store.as_retriever(search_kwargs={"k": k})
         if hasattr(retr, "get_relevant_documents"):
             return retr.get_relevant_documents(query)
         if hasattr(retr, "retrieve"):
             return retr.retrieve(query)
-    # last resort: raise
     raise RuntimeError("Unsupported vector_store API: cannot run similarity search")
 
-# --- Helper: call LLM to answer from context ---
+
 def answer_from_context(llm: ChatGoogleGenerativeAI, context_docs: List, user_question: str) -> str:
     """
-    Build a prompt that contains the concatenated context from retrieved docs and the user's question.
-    Ask LLM to answer strictly from provided context and cite when unsure.
+    Ask LLM to answer strictly using the provided context_docs. Return answer text.
     """
-    # create a compact context string (include small separators and optional source markers)
     ctx_pieces = []
     for i, d in enumerate(context_docs, start=1):
         text = getattr(d, "page_content", None) or getattr(d, "content", None) or str(d)
-        # guard length (you might want to truncate very long docs)
         ctx_pieces.append(f"--- DOCUMENT {i} ---\n{text}\n")
     context_block = "\n".join(ctx_pieces).strip() or "No context extracted."
 
@@ -111,17 +196,17 @@ def answer_from_context(llm: ChatGoogleGenerativeAI, context_docs: List, user_qu
         "If the context does not contain the answer, say you cannot answer from the video transcript.\n\n"
         f"Context from Transcript:\n{context_block}\n\n"
         f"User question: {user_question}\n\n"
-        "Answer (be concise, and base your answer strictly on the context above):"
+        "Answer (be concise and base your answer strictly on the context above):"
     )
 
     response: AIMessage = llm.invoke([HumanMessage(content=qa_prompt)])
-    answer = (response.content or "").strip()
-    return answer
+    return (response.content or "").strip()
 
-# --- Setup / caching heavy resources ---
+# ------------------- Setup / caching -------------------
+
 @st.cache_resource(show_spinner="Setting up RAG and loading transcript...")
 def setup_rag_pipeline(video_id: str):
-    # load key
+    # load key (streamlit secrets or env)
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         st.error("GEMINI_API_KEY not found in Streamlit secrets or environment.")
@@ -130,32 +215,29 @@ def setup_rag_pipeline(video_id: str):
     # init LLM
     llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0.0, api_key=api_key)
 
-    # load transcript
+    # load transcript using free-first approach
     try:
-        transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
-        transcript = " ".join(chunk.get("text", "") for chunk in transcript_list)
-    except TranscriptsDisabled:
-        st.error(f"Transcripts disabled/unavailable for video ID: {video_id}")
-        return None
+        transcript = fetch_transcript_free(video_id)
     except Exception as e:
-        st.error(f"Error fetching transcript: {e}")
-        return None
+        # bubble the error message so UI can show it
+        raise RuntimeError(f"Error fetching transcript: {e}")
 
     # chunking
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, separators=["\n\n", "\n", " ", ""])
     chunks = splitter.create_documents([transcript])
 
-    # embeddings + vectorstore
+    # embeddings + FAISS vector store
     embedding = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
     vector_store = FAISS.from_documents(chunks, embedding)
 
-    # return the LLM and vector store so caller can orchestrate manual history-aware flow
     return {"llm": llm, "vector_store": vector_store}
 
-# --- Streamlit app ---
+
+# ------------------- Streamlit app -------------------
+
 def main():
-    st.set_page_config(page_title="YouTube Transcript Chatbot (LangChain v1.0.5)", layout="wide")
-    st.title("📹 Gemini Chatbot (LangChain v1.0.5) — Chat with a YouTube Transcript")
+    st.set_page_config(page_title="YouTube Transcript Chatbot (Free Fallback)", layout="wide")
+    st.title("📹 Gemini Chatbot — Free transcript fallback (youtube-transcript-api → yt-dlp)")
 
     with st.sidebar:
         st.header("1. Enter Video URL")
@@ -173,13 +255,16 @@ def main():
             return
 
     # setup heavy resources
-    env = setup_rag_pipeline(video_id)
-    if env is None:
+    try:
+        env = setup_rag_pipeline(video_id)
+    except Exception as e:
+        st.error(str(e))
         return
+
     llm = env["llm"]
     vector_store = env["vector_store"]
 
-    # initialize session history for this video
+    # session state for this video
     if "video_id" not in st.session_state or st.session_state.video_id != video_id:
         st.session_state.video_id = video_id
         st.session_state.messages = [
@@ -192,9 +277,8 @@ def main():
         with st.chat_message(role):
             st.markdown(msg["content"])
 
-    # handle new user input
+    # handle user input
     if prompt := st.chat_input("Ask a question about the video transcript...", key=chat_key):
-        # append user message to session history
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("user"):
@@ -203,24 +287,23 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("Rewriting query, retrieving docs, and generating answer..."):
                 try:
-                    # 1) rewrite follow-up question to standalone (if needed)
-                    rewritten_query = rewrite_followup_to_standalone(llm, st.session_state.messages[:-1], prompt)
-                    # if rewriting produces an empty string, fall back to user's prompt
+                    # rewrite follow-up to standalone query using history (excluding current user message)
+                    history_for_rewrite = st.session_state.messages[:-1]
+                    rewritten_query = rewrite_followup_to_standalone(llm, history_for_rewrite, prompt)
                     if not rewritten_query:
                         rewritten_query = prompt
 
-                    # 2) retrieve documents from vector store
+                    # retrieve docs
                     retrieved_docs = retrieve_documents(vector_store, rewritten_query, k=EMBEDDING_K)
 
-                    # 3) answer using the context from retrieved docs
+                    # answer from context
                     answer = answer_from_context(llm, retrieved_docs, prompt)
 
-                    # show answer and append to history
                     st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
-
                 except Exception as e:
                     st.error(f"Chain execution failed: {e}")
+
 
 if __name__ == "__main__":
     main()
