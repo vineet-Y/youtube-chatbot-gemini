@@ -4,8 +4,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
+from langchain_community.chains import ConversationalRetrievalChain
+from langchain_community.memory import ConversationBufferMemory
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from langchain_core.prompts import PromptTemplate
 
