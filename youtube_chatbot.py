@@ -1,4 +1,4 @@
-import streamlit as st
+'''import streamlit as st
 import os
 import re
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -204,4 +204,34 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+import streamlit as st
+import langchain
+import sys
 
+def main():
+    """
+    A minimal Streamlit application to display the installed LangChain version.
+    """
+    st.set_page_config(page_title="LangChain Version Check", layout="centered")
+    
+    st.title("🐍 LangChain Version Status")
+
+    try:
+        # Access the __version__ attribute directly from the imported package
+        version = langchain.__version__
+        st.success(f"**Status: SUCCESS**")
+        st.markdown(f"The installed `langchain` version is: **`{version}`**")
+        st.info("This confirms that the core `langchain` package is successfully installed in your Streamlit environment.")
+    except AttributeError:
+        st.error("Error: Could not retrieve LangChain version.")
+        st.markdown("The `langchain` package might be installed, but the `__version__` attribute is unavailable.")
+    except ImportError:
+        st.error("Error: The `langchain` package is NOT installed.")
+        st.markdown("Please ensure `langchain` is listed in your `requirements.txt` file and your app is rebooted.")
+
+    st.markdown("---")
+    st.markdown(f"**Python Interpreter:** `{sys.version.split(' ')[0]}`")
+
+if __name__ == "__main__":
+    main()
