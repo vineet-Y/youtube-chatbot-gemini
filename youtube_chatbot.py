@@ -237,7 +237,7 @@ def answer_with_sources(llm: ChatGoogleGenerativeAI, docs: List, user_question: 
 # ---------------- Streamlit app ----------------
 
 @st.cache_resource(show_spinner="Setting up RAG and loading transcript...")
-def setup_rag_pipeline(video_id: str, uploaded_file: Optional[st.uploaded_file_manager.UploadedFile], lang: str = "en"):
+def setup_rag_pipeline(video_id: str, uploaded_file: UploadedFile | None, lang: str = "en"):
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         st.error("GEMINI_API_KEY not found in Streamlit secrets or environment.")
