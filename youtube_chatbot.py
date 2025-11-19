@@ -119,7 +119,7 @@ def load_cached_transcript(video_id: str) -> Optional[str]:
 
 # ---------------- FREE TRANSCRIPT STRATEGY ----------------
 
-def fetch_transcript_free(video_id: str, prefer_upload: Optional[st.uploaded_file_manager.UploadedFile] = None, lang: str = "en") -> str:
+def fetch_transcript_free(video_id: str, prefer_upload=None, lang: str = "en") -> str:
     # 0) If user uploaded subtitles, use them
     if prefer_upload:
         txt = read_uploaded_subtitles(prefer_upload)
