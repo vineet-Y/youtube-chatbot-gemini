@@ -58,8 +58,7 @@ def read_uploaded_subtitles(uploaded_file) -> Optional[str]:
             if ln.strip().upper().startswith("WEBVTT"):
                 continue
             lines.append(ln.rstrip())
-        return "
-".join([l for l in lines if l.strip()])
+        return "".join([l for l in lines if l.strip()])
     except Exception:
         return None
 
@@ -95,8 +94,7 @@ def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
                 if ln.strip().upper().startswith("WEBVTT"):
                     continue
                 lines.append(ln.rstrip())
-            text = "
-".join([l for l in lines if l.strip()]).strip()
+            text = "".join([l for l in lines if l.strip()]).strip()
             return text or None
     return None
 
@@ -181,27 +179,19 @@ def rewrite_followup_to_standalone(llm: ChatGoogleGenerativeAI, chat_history: Li
             role = msg.get("role", "user")
             prefix = "User:" if role == "user" else "Assistant:"
             history_text.append(f"{prefix} {msg.get('content','')}")
-        history_block = "
-".join(history_text)
+        history_block = "".join(history_text)
     else:
         history_block = "(no prior conversation)"
 
     prompt = (
-        "Rewrite the follow-up question into a concise standalone search query. Do NOT answer.
-
-"
-        f"Conversation history:
-{history_block}
-
-"
+        "Rewrite the follow-up question into a concise standalone search query. Do NOT answer."
+        f"Conversation history:{history_block}"
         f"Follow-up question: {user_question}
-
-Standalone search query:"
+        Standalone search query:"
     )
     resp: AIMessage = llm.invoke([HumanMessage(content=prompt)])
     out = (resp.content or "").strip()
-    if "
-" in out:
+    if "" in out:
         out = out.splitlines()[0].strip()
     return out
 
@@ -227,27 +217,17 @@ def answer_with_sources(llm: ChatGoogleGenerativeAI, docs: List, user_question: 
     for i, d in enumerate(docs, start=1):
         txt = getattr(d, "page_content", None) or getattr(d, "content", None) or str(d)
         src = d.metadata.get("source") if getattr(d, "metadata", None) else f"doc_{i}"
-        pieces.append(f"--- SOURCE: {src} ---
-{txt}
-")
-    context = "
-".join(pieces)
+        pieces.append(f"--- SOURCE: {src} ---{txt}")
+    context = "".join(pieces)
     if len(context) > max_context_chars:
         context = context[:max_context_chars]
 
     prompt = (
         "You are a helpful assistant. Answer the user's question ONLY using the provided transcript context. "
-        "If the answer isn't in the context, say you cannot answer from the video. Provide a short answer and then list sources (source ids) used.
-
-"
-        f"Context:
-{context}
-
-"
+        "If the answer isn't in the context, say you cannot answer from the video. Provide a short answer and then list sources (source ids) used."
+        f"Context:{context}"
         f"User question: {user_question}
-
-Answer:"
-    )
+        Answer:")
     resp: AIMessage = llm.invoke([HumanMessage(content=prompt)])
     answer = (resp.content or "").strip()
     # return answer plus the doc ids so UI can show snippets
