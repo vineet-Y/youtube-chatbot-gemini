@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit.runtime.uploaded_file_manager import UploadedFile
 import os
 import re
 import subprocess
@@ -45,7 +46,7 @@ def extract_video_id(url_or_id: str) -> Optional[str]:
     return None
 
 
-def read_uploaded_subtitles(uploaded_file) -> Optional[str]:
+def read_uploaded_subtitles(uploaded_file: UploadedFile | None):
     try:
         content = uploaded_file.read().decode("utf-8", errors="ignore")
         # crude cleanup for VTT/SRT
@@ -119,7 +120,7 @@ def load_cached_transcript(video_id: str) -> Optional[str]:
 
 # ---------------- FREE TRANSCRIPT STRATEGY ----------------
 
-def fetch_transcript_free(video_id: str, prefer_upload=None, lang: str = "en") -> str:
+def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = None, lang: str = "en"):
     # 0) If user uploaded subtitles, use them
     if prefer_upload:
         txt = read_uploaded_subtitles(prefer_upload)
