@@ -11,6 +11,9 @@ langchain-core
 langchain-text-splitters
 langchain-google-genai
 youtube-transcript-api
+langchain-community
+accelerate
+transformers
 faiss-cpu
 sentence-transformers
 huggingface-hub
