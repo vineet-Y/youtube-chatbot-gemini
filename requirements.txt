@@ -1,0 +1,15 @@
+# Environment Variable Management
+python-dotenv
+
+# Machine Learning Utilities
+numpy
+scikit-learn
+os
+streamlit
+langchain
+langchain-core
+langchain-google-genai
+youtube-transcript-api
+faiss-cpu
+sentence-transformers
+huggingface-hub
