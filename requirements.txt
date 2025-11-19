@@ -4,7 +4,7 @@ python-dotenv
 # Machine Learning Utilities
 numpy
 scikit-learn
-os
+
 streamlit
 langchain
 langchain-core
