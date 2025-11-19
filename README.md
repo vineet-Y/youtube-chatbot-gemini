@@ -4,6 +4,7 @@ A powerful chatbot that answers user queries **based on the content of any YouTu
 
 This project is designed to work even when YouTube blocks transcript requests from cloud IPs by using fallback options like **yt-dlp**, and also supports **manual subtitle uploads**.
 
+The app can be accessed at https://youtube-chatbot-gemini-bwskskjvjpmpyjnd5qpazr.streamlit.app/
 ---
 
 #  Features
@@ -38,9 +39,9 @@ This project is designed to work even when YouTube blocks transcript requests fr
 youtube-chatbot-gemini/
 │
 ├── youtube_chatbot.py        # Main Streamlit application
-├── transcript_cache/         # Cached transcripts (auto-created)
 ├── README.md                 # This file
 └── requirements.txt          # Dependencies
+
 ```
 
 ---
@@ -100,12 +101,12 @@ Gemini is instructed to answer **strictly from provided context**.
 
 ---
 
-# 🛠️ Installation & Setup
+#  Installation & Setup
 
 ### 1️. Clone the repo
 
 ```bash
-git clone https://github.com/your-username/youtube-chatbot-gemini.git
+git clone https://github.com/vineet-Y/youtube-chatbot-gemini
 cd youtube-chatbot-gemini
 ```
 
@@ -145,7 +146,7 @@ streamlit run youtube_chatbot.py
 
 ---
 
-# 📌 Usage
+#  Usage
 
 1. Enter a YouTube URL or 11-character video ID
 2. (Optional) Upload subtitles if YouTube transcript is unavailable
@@ -154,7 +155,7 @@ streamlit run youtube_chatbot.py
 
 ---
 
-# 📉 Limitations
+#  Limitations
 
 * Videos without captions (auto or manual) cannot be processed unless subtitles are uploaded
 * yt-dlp fallback requires the yt-dlp binary to be installed and available in PATH
@@ -162,31 +163,14 @@ streamlit run youtube_chatbot.py
 
 ---
 
-# ✨ Future Improvements
+#  Future Improvements
 
 * Better subtitle parsing using an SRT/VTT parser
 * Support for multilingual RAG
 * Support for Whisper transcription for videos without captions (requires compute)
 * Option to display timestamps for each retrieved chunk
 
----
 
-# 🤝 Contributing
-
-Pull requests are welcome! If you find issues or have feature ideas, feel free to open an issue.
-
----
-
-# 📜 License
-
-This project is under the MIT License.
-
----
-
-# 💬 Contact
-
-For questions or improvements, open an issue on GitHub or reach out at:
-**[your-email@example.com](mailto:your-email@example.com)**
 
 ---
 
