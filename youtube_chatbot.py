@@ -186,8 +186,7 @@ def rewrite_followup_to_standalone(llm: ChatGoogleGenerativeAI, chat_history: Li
     prompt = (
         "Rewrite the follow-up question into a concise standalone search query. Do NOT answer."
         f"Conversation history:{history_block}"
-        f"Follow-up question: {user_question}
-        Standalone search query:"
+        f"Follow-up question: {user_question} Standalone search query:"
     )
     resp: AIMessage = llm.invoke([HumanMessage(content=prompt)])
     out = (resp.content or "").strip()
@@ -226,8 +225,7 @@ def answer_with_sources(llm: ChatGoogleGenerativeAI, docs: List, user_question: 
         "You are a helpful assistant. Answer the user's question ONLY using the provided transcript context. "
         "If the answer isn't in the context, say you cannot answer from the video. Provide a short answer and then list sources (source ids) used."
         f"Context:{context}"
-        f"User question: {user_question}
-        Answer:")
+        f"User question: {user_question} Answer:")
     resp: AIMessage = llm.invoke([HumanMessage(content=prompt)])
     answer = (resp.content or "").strip()
     # return answer plus the doc ids so UI can show snippets
