@@ -65,21 +65,19 @@ def read_uploaded_subtitles(uploaded_file: UploadedFile | None):
 
 
 def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
+    """
+    Use yt-dlp to download auto-generated subtitles and return them as plain text.
+    """
     url = f"https://www.youtube.com/watch?v={video_id}"
     tmpdir = tempfile.mkdtemp(prefix="ytdlp_subs_")
     out_template = os.path.join(tmpdir, "%(id)s.%(ext)s")
 
-    # Match all English variants (en, en-US, en-GB, etc.)
-    lang_pattern = f"{lang}.*" if lang == "en" else lang
-
     cmd = [
         "yt-dlp",
         "--skip-download",
-        "--write-auto-sub",          # auto-generated captions
-        "--sub-lang",
-        lang_pattern,               # e.g. "en.*"
-        "--output",
-        out_template,
+        "--write-auto-subs",      # <-- note the 's'
+        "--sub-langs", lang,      # e.g. 'en'
+        "--output", out_template,
         url,
     ]
 
@@ -90,17 +88,21 @@ def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
             text=True,
             timeout=120,
         )
-        # Log for debugging
-        print("yt-dlp returncode:", proc.returncode)
-        print("yt-dlp stdout:", proc.stdout[:1000])
-        print("yt-dlp stderr:", proc.stderr[:1000])
-
-        if proc.returncode != 0:
-            return None
     except Exception as e:
-        print("yt-dlp failed:", repr(e))
-        return None
+        raise RuntimeError(f"yt-dlp invocation failed: {e}") from e
 
+    # Debug info (will show in Streamlit logs)
+    print("yt-dlp cmd:", " ".join(cmd))
+    print("yt-dlp returncode:", proc.returncode)
+    print("yt-dlp stdout:", proc.stdout[:1000])
+    print("yt-dlp stderr:", proc.stderr[:1000])
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"yt-dlp exited with code {proc.returncode}: {proc.stderr[:300]}"
+        )
+
+    # Find the .vtt / .srt we just downloaded
     for p in Path(tmpdir).glob("*"):
         if p.suffix.lower() in (".vtt", ".srt"):
             raw = p.read_text(encoding="utf-8", errors="ignore")
@@ -140,6 +142,8 @@ def load_cached_transcript(video_id: str) -> Optional[str]:
 # ---------------- FREE TRANSCRIPT STRATEGY ----------------
 
 def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = None, lang: str = "en"):
+    errors: list[str] = []
+
     # 0) If user uploaded subtitles, use them
     if prefer_upload:
         txt = read_uploaded_subtitles(prefer_upload)
@@ -153,27 +157,37 @@ def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = No
 
     # 2) Try youtube-transcript-api
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
+        # Try both requested language and plain English as fallback
+        transcript_list = YouTubeTranscriptApi.get_transcript(
+            video_id,
+            languages=[lang, "en"]
+        )
         text = " ".join(chunk.get("text", "") for chunk in transcript_list).strip()
         if text:
             cache_transcript(video_id, text, meta={"source": "youtube-transcript-api"})
             return text
     except (TranscriptsDisabled, NoTranscriptFound) as e:
-        print("YouTubeTranscriptApi: no transcript:", type(e).__name__)
+        errors.append(f"YouTubeTranscriptApi: {type(e).__name__} - {e}")
     except Exception as e:
-        print("YouTubeTranscriptApi error:", repr(e))
+        errors.append(f"YouTubeTranscriptApi: {type(e).__name__} - {e}")
 
     # 3) Fallback: yt-dlp (auto CC)
-    subs = download_subs_with_ytdlp(video_id, lang=lang)
-    if subs:
-        cache_transcript(video_id, subs, meta={"source": "yt-dlp"})
-        return subs
+    try:
+        subs = download_subs_with_ytdlp(video_id, lang=lang)
+        if subs:
+            cache_transcript(video_id, subs, meta={"source": "yt-dlp"})
+            return subs
+        else:
+            errors.append("yt-dlp: no subtitle file found on disk")
+    except Exception as e:
+        errors.append(f"yt-dlp: {type(e).__name__} - {e}")
 
-    # If both failed:
+    # 4) If both failed, surface all reasons
+    detail = " | ".join(errors) if errors else "unknown error"
     raise RuntimeError(
         "Could not fetch transcript via YouTubeTranscriptApi or yt-dlp. "
-        "Try uploading a subtitle file, or ensure the video has captions "
-        "in the selected language."
+        f"Details: {detail}. Try uploading a subtitle file, or ensure the video "
+        "has captions in the selected language."
     )
 
 
