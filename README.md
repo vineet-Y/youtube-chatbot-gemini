@@ -176,9 +176,8 @@ The LLM sees all this in the context, so questions like:
 
 “Compare the new video and the previous video”
 
-“How is the explanation in the first video different from the last one?”
+“How is the explanation in the first video different from the last one?” can be answered without custom hard-coded branching: the model uses the metadata to know what “newest” and “previous” refer to.
 
-can be answered without custom hard-coded branching: the model uses the metadata to know what “newest” and “previous” refer to.
 ---
 
 #  Installation & Setup
