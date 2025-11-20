@@ -68,19 +68,37 @@ def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
     url = f"https://www.youtube.com/watch?v={video_id}"
     tmpdir = tempfile.mkdtemp(prefix="ytdlp_subs_")
     out_template = os.path.join(tmpdir, "%(id)s.%(ext)s")
+
+    # Match all English variants (en, en-US, en-GB, etc.)
+    lang_pattern = f"{lang}.*" if lang == "en" else lang
+
     cmd = [
         "yt-dlp",
         "--skip-download",
-        "--write-auto-sub",
+        "--write-auto-sub",          # auto-generated captions
         "--sub-lang",
-        lang,
+        lang_pattern,               # e.g. "en.*"
         "--output",
         out_template,
         url,
     ]
+
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=90)
-    except Exception:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        # Log for debugging
+        print("yt-dlp returncode:", proc.returncode)
+        print("yt-dlp stdout:", proc.stdout[:1000])
+        print("yt-dlp stderr:", proc.stderr[:1000])
+
+        if proc.returncode != 0:
+            return None
+    except Exception as e:
+        print("yt-dlp failed:", repr(e))
         return None
 
     for p in Path(tmpdir).glob("*"):
@@ -97,6 +115,7 @@ def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
                 lines.append(ln.rstrip())
             text = "".join([l for l in lines if l.strip()]).strip()
             return text or None
+
     return None
 
 
