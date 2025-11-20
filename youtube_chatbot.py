@@ -153,26 +153,28 @@ def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = No
 
     # 2) Try youtube-transcript-api
     try:
-        # ✅ correct API usage
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
         text = " ".join(chunk.get("text", "") for chunk in transcript_list).strip()
         if text:
             cache_transcript(video_id, text, meta={"source": "youtube-transcript-api"})
             return text
+    except (TranscriptsDisabled, NoTranscriptFound) as e:
+        print("YouTubeTranscriptApi: no transcript:", type(e).__name__)
     except Exception as e:
-        # optional: log the real error instead of silently ignoring it
-        print("youtube-transcript-api error:", repr(e))
-        # and then we let it fall through to yt-dlp
-        pass
+        print("YouTubeTranscriptApi error:", repr(e))
 
-
-    # 3) Fallback: yt-dlp
+    # 3) Fallback: yt-dlp (auto CC)
     subs = download_subs_with_ytdlp(video_id, lang=lang)
     if subs:
         cache_transcript(video_id, subs, meta={"source": "yt-dlp"})
         return subs
 
-    raise RuntimeError("Could not fetch transcript. Try running locally, upload subtitle file, or ensure the video has captions.")
+    # If both failed:
+    raise RuntimeError(
+        "Could not fetch transcript via YouTubeTranscriptApi or yt-dlp. "
+        "Try uploading a subtitle file, or ensure the video has captions "
+        "in the selected language."
+    )
 
 
 # ---------------- LangChain v1.0.5-compatible RAG helpers ----------------
