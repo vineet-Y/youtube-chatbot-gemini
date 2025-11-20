@@ -65,9 +65,6 @@ def read_uploaded_subtitles(uploaded_file: UploadedFile | None):
 
 
 def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
-    """
-    Use yt-dlp to download auto-generated subtitles and return them as plain text.
-    """
     url = f"https://www.youtube.com/watch?v={video_id}"
     tmpdir = tempfile.mkdtemp(prefix="ytdlp_subs_")
     out_template = os.path.join(tmpdir, "%(id)s.%(ext)s")
@@ -75,9 +72,11 @@ def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
     cmd = [
         "yt-dlp",
         "--skip-download",
-        "--write-auto-subs",      # <-- note the 's'
-        "--sub-langs", lang,      # e.g. 'en'
-        "--output", out_template,
+        "--write-auto-subs",  # auto CC
+        "--sub-langs",
+        lang,                 # e.g. "en"
+        "--output",
+        out_template,
         url,
     ]
 
@@ -89,20 +88,17 @@ def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
             timeout=120,
         )
     except Exception as e:
-        raise RuntimeError(f"yt-dlp invocation failed: {e}") from e
+        print("yt-dlp invocation failed:", repr(e))
+        return None
 
-    # Debug info (will show in Streamlit logs)
-    print("yt-dlp cmd:", " ".join(cmd))
     print("yt-dlp returncode:", proc.returncode)
-    print("yt-dlp stdout:", proc.stdout[:1000])
-    print("yt-dlp stderr:", proc.stderr[:1000])
+    print("yt-dlp stdout:", proc.stdout[:500])
+    print("yt-dlp stderr:", proc.stderr[:500])
 
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"yt-dlp exited with code {proc.returncode}: {proc.stderr[:300]}"
-        )
+        # On your host this is where the JS-runtime warning shows up
+        return None
 
-    # Find the .vtt / .srt we just downloaded
     for p in Path(tmpdir).glob("*"):
         if p.suffix.lower() in (".vtt", ".srt"):
             raw = p.read_text(encoding="utf-8", errors="ignore")
@@ -155,13 +151,27 @@ def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = No
     if cached:
         return cached
 
-    # 2) Try youtube-transcript-api
+    # 2) Try youtube-transcript-api (works with both old & new versions)
     try:
-        # Try both requested language and plain English as fallback
-        transcript_list = YouTubeTranscriptApi.get_transcript(
-            video_id,
-            languages=[lang, "en"]
-        )
+        # Try requested language + fallback to English
+        langs = [lang] if lang else ["en"]
+        if "en" not in langs:
+            langs.append("en")
+
+        # Newer versions: classmethod get_transcript(...)
+        if hasattr(YouTubeTranscriptApi, "get_transcript"):
+            transcript_list = YouTubeTranscriptApi.get_transcript(
+                video_id,
+                languages=langs,
+            )
+        else:
+            # Older versions: instance method .fetch(...)
+            api = YouTubeTranscriptApi()
+            transcript_list = api.fetch(
+                video_id,
+                languages=langs,
+            )
+
         text = " ".join(chunk.get("text", "") for chunk in transcript_list).strip()
         if text:
             cache_transcript(video_id, text, meta={"source": "youtube-transcript-api"})
@@ -171,11 +181,11 @@ def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = No
     except Exception as e:
         errors.append(f"YouTubeTranscriptApi: {type(e).__name__} - {e}")
 
-    # 3) Fallback: yt-dlp (auto CC)
+    # 3) Fallback: yt-dlp (we’ll make this softer below)
     try:
         subs = download_subs_with_ytdlp(video_id, lang=lang)
         if subs:
-            cache_transcript(video_id, subs, meta={"source": "yt-dlp"})
+            cache_transcript(video_id, subs, meta={"source": 'yt-dlp'})
             return subs
         else:
             errors.append("yt-dlp: no subtitle file found on disk")
