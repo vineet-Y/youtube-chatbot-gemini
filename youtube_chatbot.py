@@ -134,13 +134,18 @@ def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = No
 
     # 2) Try youtube-transcript-api
     try:
-        transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=[lang])
+        # ✅ correct API usage
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
         text = " ".join(chunk.get("text", "") for chunk in transcript_list).strip()
         if text:
             cache_transcript(video_id, text, meta={"source": "youtube-transcript-api"})
             return text
-    except Exception:
+    except Exception as e:
+        # optional: log the real error instead of silently ignoring it
+        print("youtube-transcript-api error:", repr(e))
+        # and then we let it fall through to yt-dlp
         pass
+
 
     # 3) Fallback: yt-dlp
     subs = download_subs_with_ytdlp(video_id, lang=lang)
