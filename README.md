@@ -11,28 +11,48 @@ The app can be accessed at https://youtube-chatbot-gemini-bwskskjvjpmpyjnd5qpazr
 
 ###  Free-first transcript extraction
 
-* Primary: `youtube-transcript-api` (free)
-* Fallback: `yt-dlp` auto-generated subtitles (free)
-* Manual: User can upload `.vtt`, `.srt`, or `.txt` subtitles
-* Caching system to avoid re-fetching transcripts
+### Free-first transcript extraction
 
-###  RAG-based Conversational QA
+- Primary: `youtube-transcript-api` (free)
+- Fallback: `yt-dlp` auto-generated subtitles (free), when environment allows
+- Manual:
+  - Upload `.vtt`, `.srt`, or `.txt` subtitle files
+  - (Optional) Extend to support pasting raw transcript text
+- Caching system to avoid re-fetching transcripts for the same video
 
-* Uses **LangChain 1.0.5** compatible pipeline
-* Manual **history-aware question rewriting** (LLM-based)
-* FAISS vector store for fast semantic retrieval
-* Gemini 2.5 Flash for rewriting + answering
-* Source snippet display for transparency
+### RAG-based Conversational QA
 
-###  Streamlit UI
+- Uses LangChain 1.0.5 compatible pipeline
+- LLM-based, history-aware question rewriting
+- FAISS vector store for fast semantic retrieval
+- Gemini 2.5 Flash for rewriting and answering
+- Source snippet display for transparency
 
-* Enter video URL or upload subtitles
-* Interactive chat interface
-* Toggle to show “sources used”
-* Language selection for transcript
+### Multi-video session memory
+
+- Every video loaded in the current Streamlit session gets:
+  - Its own transcript
+  - Its own FAISS vector store
+  - Its own metadata (`video_key`, `video_index`, `video_is_newest`)
+- All videos are stored in `st.session_state`, so the chatbot can:
+  - Remember multiple videos at once
+  - Know which video is the newest
+  - Answer questions that reference the “new video”, “previous video” or “first video”
+- Retrieval can aggregate chunks from **all** loaded videos, so you can ask:
+  - “Compare the latest video with the first one.”
+  - “How does the explanation of eigenvalues differ between the last two videos?”
+  - “Which video gives a more intuitive explanation of X?”
+
+### Streamlit UI
+
+- Enter a YouTube URL or 11-character video ID
+- Or upload subtitles manually
+- Interactive chat interface using `st.chat_message`
+- Toggle to show “sources used”
+- Language selection for transcript extraction
+- Session-level memory across multiple videos
 
 ---
-
 #  Project Structure
 
 ```
@@ -55,7 +75,7 @@ The system attempts transcript extraction in the following order:
 1. **Uploaded subtitles** (if provided)
 2. **Cached transcript** (if previously fetched)
 3. **YouTube Transcript API**
-4. **yt-dlp auto subtitles** (fallback)
+4. **yt-dlp auto subtitles** (fallback, when environment + JS runtime allow it)
 
 This ensures maximum reliability without using paid proxy services.
 
@@ -66,7 +86,17 @@ This ensures maximum reliability without using paid proxy services.
 * Transcript is split into overlapping chunks with `RecursiveCharacterTextSplitter`
 * Each chunk is embedded using **HuggingFace MiniLM** embeddings
 * Stored in **FAISS** vector database
-* Chunks receive metadata labels like `chunk_1`, `chunk_2` for source tracking
+* Each chunk is given metadata such as:
+
+source: simple chunk ID like chunk_1, chunk_2, etc.
+
+In multi-video mode, additional metadata is attached at retrieval time:
+
+video_key (e.g. YouTube ID or an uploaded::filename key)
+
+video_index (0 = oldest, higher = newer)
+
+video_is_newest (boolean flag)
 
 ---
 
@@ -74,31 +104,81 @@ This ensures maximum reliability without using paid proxy services.
 
 ### Step A: Rewrite Query
 
-The model rewrites the user's follow-up question into a **standalone query** using conversation history.
+The model rewrites the user’s follow-up question into a standalone search query, using the full conversation history stored in st.session_state.messages.
 
 Example:
 
-> User: "What happened after that?"
+User: “What happened after that?”
 
 LLM rewrites to:
 
-> "Explain the turning point discussed in the video after the speaker mentions project failures."
+“Explain the turning point discussed in the video after the speaker mentions project failures.”
+
+This rewritten query is used to retrieve the most relevant chunks from the vector stores.
 
 ---
 
 ### Step B: Retrieve Relevant Chunks
 
-FAISS retrieves the top-k chunks based on the rewritten query.
+The app queries FAISS with the rewritten query.
+
+In multi-video mode:
+
+It iterates over all known videos in the session (stored in st.session_state.video_envs and st.session_state.video_order).
+
+For each video’s vector store, it retrieves top-k chunks (e.g. k = EMBEDDING_K // 2).
+
+It annotates each retrieved chunk with video metadata (video_key, video_index, video_is_newest).
+
+It combines all retrieved chunks into a single context for the LLM.
+
+This allows the model to see, in the prompt, which chunks come from which video and which video is the “newest”.
 
 ---
 
 ### Step C: Answer From Context Only
 
-Gemini is instructed to answer **strictly from provided context**.
+Gemini is instructed to answer strictly from the provided context:
 
-* If the answer is not in the transcript, the bot explicitly states it.
-* Shows used sources (video chunk IDs).
+*If the answer is not present in the transcript context, the bot explicitly says that it cannot answer from the videos.
 
+*The final response can naturally differentiate between videos using the metadata (e.g. “In the first video…” vs “In the latest video…”).
+
+*The UI displays source snippets for transparency.
+
+---
+
+## 4. Multi-Video Memory & Cross-Video Reasoning
+
+Within a single Streamlit session:
+
+Each time you load a new video (new URL or new uploaded subtitle file):
+
+The app builds a new transcript + FAISS vector store via setup_rag_pipeline.
+
+It stores this environment in st.session_state.video_envs[video_key].
+
+It appends the key to st.session_state.video_order.
+
+The most recently loaded video is treated as the “newest”.
+
+At query time:
+
+The app:
+
+Rewrites the user’s query.
+
+Retrieves relevant chunks from all videos’ vector stores.
+
+Attaches video_key, video_index, and video_is_newest metadata to each chunk.
+
+The LLM sees all this in the context, so questions like:
+
+“Compare the new video and the previous video”
+
+“How is the explanation in the first video different from the last one?”
+
+can be answered without custom hard-coded branching: the model uses the metadata to know what “newest” and “previous” refer to.
 ---
 
 #  Installation & Setup
@@ -169,6 +249,7 @@ streamlit run youtube_chatbot.py
 * Support for multilingual RAG
 * Support for Whisper transcription for videos without captions (requires compute)
 * Option to display timestamps for each retrieved chunk
+
 
 
 
