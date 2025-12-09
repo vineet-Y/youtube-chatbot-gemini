@@ -72,13 +72,16 @@ def download_subs_with_ytdlp(video_id: str, lang: str = "en") -> Optional[str]:
     cmd = [
         "yt-dlp",
         "--skip-download",
-        "--write-auto-subs",  # auto CC
-        "--sub-langs",
-        lang,                 # e.g. "en"
+        "--write-auto-subs",        # auto CC
+        "--write-subs",             # regular subs if present
+        "--sub-langs", lang,        # e.g. "en"
+        "--sub-format", "vtt/srt/best",
+        "--convert-subs", "srt",    # convert to srt if possible
         "--output",
         out_template,
         url,
     ]
+
 
     try:
         proc = subprocess.run(
@@ -172,10 +175,22 @@ def fetch_transcript_free(video_id: str, prefer_upload: UploadedFile | None = No
                 languages=langs,
             )
 
-        text = " ".join(chunk.get("text", "") for chunk in transcript_list).strip()
+        # normalize transcript_list items (support dicts and objects like FetchedTranscriptSnippet)
+        parts = []
+        for chunk in transcript_list:
+            try:
+                # first try dict-like access
+                txt = chunk.get("text", "")
+            except Exception:
+                # fallback to attribute access (e.g., FetchedTranscriptSnippet.text)
+                txt = getattr(chunk, "text", "") or getattr(chunk, "content", "") or ""
+            if txt:
+                parts.append(txt)
+        text = " ".join(parts).strip()
         if text:
             cache_transcript(video_id, text, meta={"source": "youtube-transcript-api"})
             return text
+
     except (TranscriptsDisabled, NoTranscriptFound) as e:
         errors.append(f"YouTubeTranscriptApi: {type(e).__name__} - {e}")
     except Exception as e:
